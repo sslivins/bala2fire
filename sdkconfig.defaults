@@ -18,3 +18,7 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
 
 # C++ exceptions off (M5Unified uses RTTI but not exceptions)
 CONFIG_COMPILER_CXX_RTTI=y
+
+# 1 kHz FreeRTOS tick so the 200 Hz balancer loop has 5 ms resolution.
+# (Default is 100 Hz, which rounds pdMS_TO_TICKS(5) to 0 ticks.)
+CONFIG_FREERTOS_HZ=1000
