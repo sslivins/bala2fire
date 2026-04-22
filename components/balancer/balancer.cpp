@@ -172,6 +172,12 @@ static void control_task(void *arg)
     float angle_deg = 0;
     bool  filter_primed = false;
 
+    // Gyro bias (learned while DISARMED, frozen while ARMING/ARMED).
+    // MPU6886 spec bias is ~1-5 dps but we observed ~160 dps on this unit
+    // without calibration, which caused the angle to integrate wildly.
+    float gyro_bias_dps = 0;
+    bool  bias_primed = false;
+
     // Encoder / speed state (unsigned-safe delta)
     uint32_t enc_l_u = 0, enc_r_u = 0;
     bool enc_primed = false;
@@ -212,7 +218,12 @@ static void control_task(void *arg)
         pick_other_accel_axes(ax, ay, az, &a_other_a, &a_other_b);
         float accel_angle_deg =
             atan2f(a_tilt, sqrtf(a_other_a*a_other_a + a_other_b*a_other_b)) * RAD2DEG;
-        float gyro_dps = pick_gyro_axis(gx, gy, gz);
+        float gyro_raw_dps = pick_gyro_axis(gx, gy, gz);
+        if (!bias_primed) {
+            gyro_bias_dps = gyro_raw_dps;
+            bias_primed = true;
+        }
+        float gyro_dps = gyro_raw_dps - gyro_bias_dps;
 
         // Complementary filter. If |accel| is far from 1 g (heavy
         // lateral/vertical acceleration), trust the gyro only.
@@ -250,6 +261,19 @@ static void control_task(void *arg)
         portENTER_CRITICAL(&s_lock);
         st = s_status.state;
         portEXIT_CRITICAL(&s_lock);
+
+        // Learn gyro bias continuously while idle; freeze while armed.
+        // ~0.5 s convergence @ 200 Hz.
+        if (st == BALANCER_DISARMED ||
+            st == BALANCER_CRASHED ||
+            st == BALANCER_FAULT) {
+            const float alpha = 0.01f;
+            gyro_bias_dps = (1.0f - alpha) * gyro_bias_dps +
+                                   alpha  * gyro_raw_dps;
+            // And don't let the angle integrate away while idle —
+            // just show the accel reading (still useful for axis check).
+            if (accel_trustworthy) angle_deg = accel_angle_deg;
+        }
 
         // Operator requests
         if (s_disarm_request) {
