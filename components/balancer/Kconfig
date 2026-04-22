@@ -1,0 +1,132 @@
+menu "Bala2 balancer"
+
+    config BALANCER_LOOP_HZ
+        int "Control loop rate (Hz)"
+        default 200
+        range 50 400
+
+    config BALANCER_PWM_LIMIT
+        int "Max motor PWM (abs, 0..1023)"
+        default 400
+        range 50 1023
+        help
+            Conservative default. Raise as you tune. Reference
+            implementation uses 1023.
+
+    config BALANCER_TILT_CUTOFF_DEG
+        int "Safety cutoff tilt (deg)"
+        default 45
+        range 20 75
+        help
+            If |angle| exceeds this, motors are disarmed and the
+            balancer enters CRASHED until manually re-armed.
+
+    config BALANCER_ARM_ANGLE_DEG
+        int "Arming window (deg)"
+        default 10
+        range 1 30
+        help
+            To arm, the robot must be within +/- this many degrees of
+            the setpoint and moving slowly for BALANCER_ARM_STILL_MS.
+
+    config BALANCER_ARM_STILL_MS
+        int "Arming still time (ms)"
+        default 300
+        range 50 2000
+
+    config BALANCER_SETPOINT_MDEG
+        int "Target tilt setpoint (millideg)"
+        default 0
+        range -5000 5000
+        help
+            Balance target in 1/1000 deg. Tune per-robot for weight
+            balance; reference uses ~-1500 (-1.5 deg).
+
+    comment "Angle PID  (outer loop on tilt, output = PWM)"
+
+    config BALANCER_ANGLE_KP_MILLI
+        int "Angle kp (x1000)"
+        default 15000
+        help
+            Reference is 24000. Conservative default is lower.
+
+    config BALANCER_ANGLE_KI_MILLI
+        int "Angle ki (x1000)"
+        default 0
+
+    config BALANCER_ANGLE_KD_MILLI
+        int "Angle kd (x1000)"
+        default 60000
+        help
+            Reference is 90000.
+
+    config BALANCER_ANGLE_DIR_POS
+        bool "Angle PID output positive direction"
+        default n
+        help
+            If the robot drives INTO the fall instead of away from it,
+            toggle this. Equivalent to multiplying kp/ki/kd by -1.
+
+    comment "Speed PID  (inner loop on wheel speed, output adds to PWM)"
+
+    config BALANCER_SPEED_KP_MILLI
+        int "Speed kp (x1000)"
+        default 15000
+
+    config BALANCER_SPEED_KI_MILLI
+        int "Speed ki (x1000)"
+        default 75
+
+    config BALANCER_SPEED_KD_MILLI
+        int "Speed kd (x1000)"
+        default 0
+
+    config BALANCER_SPEED_I_LIMIT
+        int "Speed PID integral clamp"
+        default 40
+
+    config BALANCER_SPEED_DIR_POS
+        bool "Speed PID output positive direction"
+        default y
+
+    comment "Sensor axis / motor polarity"
+
+    choice BALANCER_TILT_ACCEL_AXIS
+        prompt "Accelerometer tilt axis"
+        default BALANCER_TILT_ACCEL_AXIS_Y
+        config BALANCER_TILT_ACCEL_AXIS_X
+            bool "X"
+        config BALANCER_TILT_ACCEL_AXIS_Y
+            bool "Y"
+        config BALANCER_TILT_ACCEL_AXIS_Z
+            bool "Z"
+    endchoice
+
+    config BALANCER_TILT_ACCEL_INVERT
+        bool "Invert accelerometer tilt sign"
+        default n
+
+    choice BALANCER_TILT_GYRO_AXIS
+        prompt "Gyro rate axis"
+        default BALANCER_TILT_GYRO_AXIS_X
+        config BALANCER_TILT_GYRO_AXIS_X
+            bool "X"
+        config BALANCER_TILT_GYRO_AXIS_Y
+            bool "Y"
+        config BALANCER_TILT_GYRO_AXIS_Z
+            bool "Z"
+    endchoice
+
+    config BALANCER_TILT_GYRO_INVERT
+        bool "Invert gyro rate sign"
+        default n
+
+    config BALANCER_MOTOR_INVERT_LEFT
+        bool "Invert LEFT motor"
+        default n
+
+    config BALANCER_MOTOR_INVERT_RIGHT
+        bool "Invert RIGHT motor"
+        default n
+
+endmenu
