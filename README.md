@@ -58,6 +58,31 @@ idf.py -p <PORT> flash monitor   # Ctrl-] to exit monitor
 The first build downloads `M5Unified` + `M5GFX` into `managed_components/`
 (a few minutes). Subsequent builds are fast.
 
+## Configuring Wi-Fi
+
+The starter can optionally join a Wi-Fi network on boot and display
+the IP address on the TFT. Out of the box SSID is blank, so you'll
+see `IP: not configured`.
+
+To set credentials:
+
+```bash
+idf.py menuconfig
+#   Bala2 Fire configuration  --->
+#     (your-ssid)     Wi-Fi SSID
+#     (your-password) Wi-Fi password
+#     (10000)         Wi-Fi connect timeout (ms)
+```
+
+Save + exit, then `idf.py flash monitor`. The display will show
+`IP: connecting...` → `IP: 192.168.x.y` once it joins, or
+`IP: connect failed` after the timeout.
+
+**Credentials live in the gitignored `sdkconfig`**, so they stay on
+your machine. If you want per-developer overrides, create
+`sdkconfig.local` (also gitignored) — ESP-IDF auto-merges it on top
+of `sdkconfig.defaults`.
+
 ## Project layout
 
 ```
@@ -66,7 +91,9 @@ bala2/
 ├── sdkconfig.defaults          # PSRAM, 16 MB flash, 240 MHz CPU
 ├── main/
 │   ├── CMakeLists.txt
+│   ├── Kconfig.projbuild       # `idf.py menuconfig` -> Bala2 Fire configuration
 │   ├── idf_component.yml       # pulls in m5stack/M5Unified
+│   ├── bala2_wifi.h/.c         # non-blocking Wi-Fi STA connect
 │   └── bala2_main.cpp          # app_main() — edit this
 ├── dependencies.lock           # committed; pins component versions
 └── .github/
@@ -76,6 +103,9 @@ bala2/
 ## What the starter app does
 
 - Draws `Bala2 Fire / Hello, world!` on the TFT
+- Shows the Wi-Fi STA MAC address
+- Joins Wi-Fi if configured via `idf.py menuconfig` and shows the IP
+  (or `IP: not configured` / `IP: connect failed`)
 - **Button A** → increments an on-screen counter
 - **Button B** → plays a 1 kHz beep on the speaker
 - **Button C** → reads MPU6886 accel and prints `ax`/`ay`

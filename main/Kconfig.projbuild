@@ -1,0 +1,25 @@
+menu "Bala2 Fire configuration"
+
+    config BALA2_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            SSID of the Wi-Fi network the Bala2 Fire should join.
+            Leave blank to skip Wi-Fi on boot (the display will show
+            "Wi-Fi: not configured").
+
+    config BALA2_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            WPA/WPA2 password. Leave blank for an open network.
+
+    config BALA2_WIFI_CONNECT_TIMEOUT_MS
+        int "Wi-Fi connect timeout (ms)"
+        default 10000
+        range 1000 60000
+        help
+            How long to wait for an IP before giving up and showing
+            "Wi-Fi: failed" on the display.
+
+endmenu
