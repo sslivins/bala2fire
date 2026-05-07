@@ -29,14 +29,25 @@ CONFIG_FREERTOS_HZ=1000
 # during balance. Flip back to negative direction.
 # CONFIG_BALANCER_ANGLE_DIR_POS is not set
 
-# Bumped balance gains toward the reference impl. The Kconfig defaults
-# are intentionally conservative (kp=15, kd=60, PWM=400) and the bot
-# couldn't catch its own fall. Reference values: kp=24, kd=90, PWM=1023.
-# Going to kp=24, kd=90, PWM=800 — full reference gains with some PWM
-# headroom retained for safety.
-CONFIG_BALANCER_PWM_LIMIT=800
+# Bumped balance gains toward the reference impl. Verified on hardware:
+# at kp=24 / kd=90 / PWM=400 the bot ran away from disturbances. At
+# kp=24 / kd=180 / PWM=800 / setpoint=+1.0 the bot achieves stable
+# balance (steady angle near 0 with PWM ~ ±40, no constant forward
+# drive) but still can't reject disturbances >= ~6° before the fall
+# becomes irrecoverable. Bumping PWM_LIMIT to the hardware max (1023)
+# gives the angle PID full recovery authority during transients;
+# steady-state is unaffected (steady PWM was ±40 << 1023).
+CONFIG_BALANCER_PWM_LIMIT=1023
 CONFIG_BALANCER_ANGLE_KP_MILLI=24000
-CONFIG_BALANCER_ANGLE_KD_MILLI=90000
+CONFIG_BALANCER_ANGLE_KD_MILLI=180000
+
+# Setpoint trim: this physical bot's "natural upright" sits at IMU
+# angle ~+1.0° (observed during multiple stable-balance windows of
+# 2-17 s: angle hovered at +0.9..+1.3° with steady PWM near +30
+# driving the bot forward against the floor at setpoint=0). With
+# setpoint=+1.0 the controller no longer drives forward in steady
+# state; PWM hovers around 0 and the bot holds station.
+CONFIG_BALANCER_SETPOINT_MDEG=1000
 
 # OTA partition layout (two ~3 MB app slots + 10 MB FAT) so we can flash
 # new firmware over Wi-Fi via components/bala2_ota.
