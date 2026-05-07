@@ -1,0 +1,16 @@
+[project]
+name = "bala2-mcp"
+version = "0.1.0"
+description = "MCP server for the Bala2 Fire balancing robot"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["bala2_mcp"]

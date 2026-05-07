@@ -96,6 +96,11 @@ static balancer_status_t s_status;
 static volatile bool s_arm_request;
 static volatile bool s_disarm_request;
 
+// Live setpoint, mutable at runtime via balancer_set_setpoint(). The
+// control task copies this into its local PID at the top of each
+// iteration. Initialised from Kconfig in balancer_start().
+static float s_setpoint_deg;
+
 static void set_state(balancer_state_t st) __attribute__((unused));
 static void set_state(balancer_state_t st) {
     portENTER_CRITICAL(&s_lock);
@@ -193,6 +198,11 @@ static void control_task(void *arg)
 
     for (;;) {
         vTaskDelayUntil(&next_wake, period);
+
+        // Pick up any setpoint change from the HTTP layer.
+        portENTER_CRITICAL(&s_lock);
+        angle_pid.setpoint = s_setpoint_deg;
+        portEXIT_CRITICAL(&s_lock);
 
         // --- Measure dt ---
         int64_t now_us = esp_timer_get_time();
@@ -384,6 +394,7 @@ extern "C" esp_err_t balancer_start(void)
 {
     memset(&s_status, 0, sizeof(s_status));
     s_status.state = BALANCER_DISARMED;
+    s_setpoint_deg = setpoint_deg();
     BaseType_t ok = xTaskCreatePinnedToCore(
         control_task, "balancer", 6 * 1024, NULL,
         /*priority*/ 10, NULL, /*core*/ 1);
@@ -392,6 +403,24 @@ extern "C" esp_err_t balancer_start(void)
 
 extern "C" void balancer_arm(void)    { s_arm_request = true; }
 extern "C" void balancer_disarm(void) { s_disarm_request = true; }
+
+extern "C" void balancer_set_setpoint(float deg)
+{
+    if (deg < -30.0f) deg = -30.0f;
+    if (deg >  30.0f) deg =  30.0f;
+    portENTER_CRITICAL(&s_lock);
+    s_setpoint_deg = deg;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" float balancer_get_setpoint(void)
+{
+    float v;
+    portENTER_CRITICAL(&s_lock);
+    v = s_setpoint_deg;
+    portEXIT_CRITICAL(&s_lock);
+    return v;
+}
 
 extern "C" bool balancer_is_armed(void)
 {
@@ -408,4 +437,55 @@ extern "C" void balancer_get_status(balancer_status_t *out)
     portENTER_CRITICAL(&s_lock);
     *out = s_status;
     portEXIT_CRITICAL(&s_lock);
+}
+
+static const char *state_name(balancer_state_t s)
+{
+    switch (s) {
+        case BALANCER_BOOT:     return "BOOT";
+        case BALANCER_DISARMED: return "DISARMED";
+        case BALANCER_ARMING:   return "ARMING";
+        case BALANCER_ARMED:    return "ARMED";
+        case BALANCER_CRASHED:  return "CRASHED";
+        case BALANCER_FAULT:    return "FAULT";
+    }
+    return "UNKNOWN";
+}
+
+extern "C" int balancer_format_telemetry_json(char *buf, int buflen)
+{
+    if (!buf || buflen <= 0) return -1;
+    balancer_status_t s;
+    float setpoint;
+    portENTER_CRITICAL(&s_lock);
+    s = s_status;
+    setpoint = s_setpoint_deg;
+    portEXIT_CRITICAL(&s_lock);
+
+    int n = snprintf(buf, (size_t)buflen,
+        "{"
+        "\"state\":\"%s\","
+        "\"angle_deg\":%.3f,"
+        "\"gyro_dps\":%.2f,"
+        "\"accel_g\":%.3f,"
+        "\"pwm_left\":%d,"
+        "\"pwm_right\":%d,"
+        "\"enc_left\":%ld,"
+        "\"enc_right\":%ld,"
+        "\"loop_dt_ms\":%.2f,"
+        "\"setpoint_deg\":%.3f,"
+        "\"loops\":%lu,"
+        "\"overruns\":%lu,"
+        "\"i2c_errs\":%lu"
+        "}",
+        state_name(s.state),
+        s.angle_deg, s.gyro_dps, s.accel_mag_g,
+        (int)s.pwm_left, (int)s.pwm_right,
+        (long)s.enc_left, (long)s.enc_right,
+        s.loop_dt_ms, setpoint,
+        (unsigned long)s.loops,
+        (unsigned long)s.overrun_count,
+        (unsigned long)s.i2c_err_count);
+    if (n < 0 || n >= buflen) return -2;
+    return n;
 }

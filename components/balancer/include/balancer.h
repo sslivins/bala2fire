@@ -56,8 +56,23 @@ void balancer_arm(void);
 void balancer_disarm(void);
 bool balancer_is_armed(void);
 
+// Runtime tuning. Setpoint can be adjusted while ARMED — the control
+// loop picks up the new value on its next iteration. Range is clamped
+// to [-30, +30] deg internally so a stray command can't fling the bot.
+void balancer_set_setpoint(float deg);
+float balancer_get_setpoint(void);
+
 // Telemetry snapshot (copied out; thread-safe).
 void balancer_get_status(balancer_status_t *out);
+
+// Format a snapshot as a single JSON object into `buf`. Returns the
+// number of bytes written (excluding the trailing NUL), or a negative
+// errno-style value on overflow. Output shape:
+//   {"state":"ARMED","angle_deg":0.42,"gyro_dps":-1.3,"accel_g":1.00,
+//    "pwm_left":12,"pwm_right":12,"enc_left":1234,"enc_right":1240,
+//    "loop_dt_ms":5.0,"setpoint_deg":0.0,"loops":12345,
+//    "overruns":0,"i2c_errs":0}
+int balancer_format_telemetry_json(char *buf, int buflen);
 
 #ifdef __cplusplus
 }

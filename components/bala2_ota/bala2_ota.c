@@ -10,6 +10,7 @@
 #include <string.h>
 #include <inttypes.h>
 
+#include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -180,6 +181,105 @@ static const httpd_uri_t uri_update = {
     .uri = "/update", .method = HTTP_POST, .handler = update_post_handler,
 };
 
+// ----- Control surface (used by the laptop-side MCP server) -----
+
+static esp_err_t telemetry_get_handler(httpd_req_t *req)
+{
+    char body[512];
+    int n = balancer_format_telemetry_json(body, sizeof(body));
+    if (n < 0) {
+        return send_simple(req, 500, "text/plain",
+            "telemetry buffer overflow\n");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, n);
+}
+
+static esp_err_t arm_post_handler(httpd_req_t *req)
+{
+    balancer_arm();
+    // The balancer may stay in ARMING for a moment; report current state.
+    char body[256];
+    int n = balancer_format_telemetry_json(body, sizeof(body));
+    if (n < 0) return send_simple(req, 500, "text/plain", "telemetry overflow\n");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, n);
+}
+
+static esp_err_t disarm_post_handler(httpd_req_t *req)
+{
+    balancer_disarm();
+    char body[256];
+    int n = balancer_format_telemetry_json(body, sizeof(body));
+    if (n < 0) return send_simple(req, 500, "text/plain", "telemetry overflow\n");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, n);
+}
+
+// Read up to `cap-1` bytes of request body into `buf`, NUL-terminate.
+// Returns bytes read (>=0), or negative on error / truncation.
+static int read_body(httpd_req_t *req, char *buf, int cap)
+{
+    if (req->content_len <= 0) return 0;
+    if (req->content_len >= cap) return -1;  // refuse oversize bodies
+    int total = 0;
+    while (total < req->content_len) {
+        int r = httpd_req_recv(req, buf + total, req->content_len - total);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            return -2;
+        }
+        total += r;
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+static esp_err_t setpoint_post_handler(httpd_req_t *req)
+{
+    char body[128];
+    int n = read_body(req, body, sizeof(body));
+    if (n < 0) {
+        return send_simple(req, 400, "text/plain",
+            n == -1 ? "body too large\n" : "read error\n");
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        return send_simple(req, 400, "text/plain",
+            "invalid JSON; expect {\"deg\": <number>}\n");
+    }
+    cJSON *deg = cJSON_GetObjectItemCaseSensitive(root, "deg");
+    if (!cJSON_IsNumber(deg)) {
+        cJSON_Delete(root);
+        return send_simple(req, 400, "text/plain",
+            "missing or non-numeric 'deg'\n");
+    }
+    float v = (float)deg->valuedouble;
+    cJSON_Delete(root);
+
+    balancer_set_setpoint(v);
+    float applied = balancer_get_setpoint();
+
+    char out[96];
+    int m = snprintf(out, sizeof(out),
+        "{\"setpoint_deg\":%.3f,\"requested\":%.3f}", applied, v);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, out, m);
+}
+
+static const httpd_uri_t uri_telemetry = {
+    .uri = "/telemetry", .method = HTTP_GET, .handler = telemetry_get_handler,
+};
+static const httpd_uri_t uri_arm = {
+    .uri = "/arm", .method = HTTP_POST, .handler = arm_post_handler,
+};
+static const httpd_uri_t uri_disarm = {
+    .uri = "/disarm", .method = HTTP_POST, .handler = disarm_post_handler,
+};
+static const httpd_uri_t uri_setpoint = {
+    .uri = "/setpoint", .method = HTTP_POST, .handler = setpoint_post_handler,
+};
+
 esp_err_t bala2_ota_start(void)
 {
     if (s_server) return ESP_OK;
@@ -202,6 +302,10 @@ esp_err_t bala2_ota_start(void)
     httpd_register_uri_handler(s_server, &uri_root);
     httpd_register_uri_handler(s_server, &uri_info);
     httpd_register_uri_handler(s_server, &uri_update);
+    httpd_register_uri_handler(s_server, &uri_telemetry);
+    httpd_register_uri_handler(s_server, &uri_arm);
+    httpd_register_uri_handler(s_server, &uri_disarm);
+    httpd_register_uri_handler(s_server, &uri_setpoint);
 
     ESP_LOGI(TAG, "HTTP server listening on :80");
     return ESP_OK;
