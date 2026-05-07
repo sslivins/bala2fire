@@ -57,7 +57,7 @@ def main() -> int:
     gyros = [s["gyro_dps"] for s in samples]
     pwms = [(s["pwm_left"] + s["pwm_right"]) / 2 for s in samples]
     setpoints = [s["setpoint_deg"] for s in samples]
-    pwm_limit = 800  # current sdkconfig
+    pwm_limit = 1023  # current sdkconfig (full hw authority)
 
     rms_err = math.sqrt(sum((a - sp) ** 2 for a, sp in zip(angles, setpoints))
                         / len(angles))
