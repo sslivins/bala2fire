@@ -23,9 +23,20 @@ CONFIG_COMPILER_CXX_RTTI=y
 # (Default is 100 Hz, which rounds pdMS_TO_TICKS(5) to 0 ticks.)
 CONFIG_FREERTOS_HZ=1000
 
-# Flip angle PID direction: verified on-hardware that tilting forward
-# drove the wheels INTO the fall with the default (-1) direction.
-CONFIG_BALANCER_ANGLE_DIR_POS=y
+# Angle PID direction: tested on-hardware. The default direction had
+# wheels driving INTO the fall; flipping to POS=y was previously logged
+# as the fix, but on the current bot the wheels still spin backward
+# during balance. Flip back to negative direction.
+# CONFIG_BALANCER_ANGLE_DIR_POS is not set
+
+# Bumped balance gains toward the reference impl. The Kconfig defaults
+# are intentionally conservative (kp=15, kd=60, PWM=400) and the bot
+# couldn't catch its own fall. Reference values: kp=24, kd=90, PWM=1023.
+# Going to kp=24, kd=90, PWM=800 — full reference gains with some PWM
+# headroom retained for safety.
+CONFIG_BALANCER_PWM_LIMIT=800
+CONFIG_BALANCER_ANGLE_KP_MILLI=24000
+CONFIG_BALANCER_ANGLE_KD_MILLI=90000
 
 # OTA partition layout (two ~3 MB app slots + 10 MB FAT) so we can flash
 # new firmware over Wi-Fi via components/bala2_ota.
