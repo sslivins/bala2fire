@@ -47,7 +47,16 @@ CONFIG_BALANCER_ANGLE_KD_MILLI=180000
 # driving the bot forward against the floor at setpoint=0). With
 # setpoint=+1.0 the controller no longer drives forward in steady
 # state; PWM hovers around 0 and the bot holds station.
+#
+# Reference impl uses -1.5° (their bot's calibrated angle_center).
+# Same role, different per-bot value.
 CONFIG_BALANCER_SETPOINT_MDEG=1000
+
+# Speed PID direction: matches the M5Stack Bala2 reference impl
+# (https://github.com/m5stack/M5-ProductExampleCodes/tree/master/Application/Bala2)
+# which uses speed_pid.SetDirection(1). Earlier guess that this bot's
+# encoder polarity required a flip turned out to be wrong — reverting.
+CONFIG_BALANCER_SPEED_DIR_POS=y
 
 # OTA partition layout (two ~3 MB app slots + 10 MB FAT) so we can flash
 # new firmware over Wi-Fi via components/bala2_ota.
