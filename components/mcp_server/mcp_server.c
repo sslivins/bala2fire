@@ -69,6 +69,7 @@ static const char *state_str(balancer_state_t s)
         case BALANCER_ARMED:    return "armed";
         case BALANCER_CRASHED:  return "crashed";
         case BALANCER_FAULT:    return "fault";
+        case BALANCER_EXTERNAL: return "external";
     }
     return "?";
 }
@@ -115,6 +116,74 @@ static cJSON *tool_drive(const cJSON *args)
     return make_text_content(buf);
 }
 
+// ---- Host-side PID support ----
+
+static cJSON *tool_get_imu(const cJSON *args)
+{
+    (void)args;
+    balancer_imu_t s;
+    balancer_get_imu(&s);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "state", state_str(s.state));
+    cJSON_AddNumberToObject(o, "angle_deg", s.angle_deg);
+    cJSON_AddNumberToObject(o, "gyro_dps", s.gyro_dps);
+    cJSON_AddNumberToObject(o, "accel_x", s.accel_x);
+    cJSON_AddNumberToObject(o, "accel_y", s.accel_y);
+    cJSON_AddNumberToObject(o, "accel_z", s.accel_z);
+    cJSON_AddNumberToObject(o, "gyro_x", s.gyro_x);
+    cJSON_AddNumberToObject(o, "gyro_y", s.gyro_y);
+    cJSON_AddNumberToObject(o, "gyro_z", s.gyro_z);
+    cJSON_AddNumberToObject(o, "gyro_bias_dps", s.gyro_bias_dps);
+    cJSON_AddNumberToObject(o, "loop_dt_ms", s.loop_dt_ms);
+    cJSON_AddNumberToObject(o, "loops", s.loops);
+    char *txt = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    cJSON *res = make_text_content(txt ? txt : "{}");
+    if (txt) cJSON_free(txt);
+    return res;
+}
+
+static cJSON *tool_set_external(const cJSON *args)
+{
+    cJSON *je = cJSON_GetObjectItemCaseSensitive(args, "enabled");
+    if (!cJSON_IsBool(je)) {
+        return make_text_content("{\"ok\":false,\"error\":\"missing 'enabled' (bool)\"}");
+    }
+    bool en = cJSON_IsTrue(je);
+    esp_err_t err = balancer_set_external(en);
+    char buf[96];
+    if (err == ESP_OK) {
+        snprintf(buf, sizeof(buf), "{\"ok\":true,\"enabled\":%s}",
+                 en ? "true" : "false");
+    } else {
+        snprintf(buf, sizeof(buf),
+                 "{\"ok\":false,\"error\":\"%s\",\"hint\":\"call disarm first\"}",
+                 esp_err_to_name(err));
+    }
+    return make_text_content(buf);
+}
+
+static cJSON *tool_set_pwm(const cJSON *args)
+{
+    cJSON *jl = cJSON_GetObjectItemCaseSensitive(args, "left");
+    cJSON *jr = cJSON_GetObjectItemCaseSensitive(args, "right");
+    if (!cJSON_IsNumber(jl) || !cJSON_IsNumber(jr)) {
+        return make_text_content("{\"ok\":false,\"error\":\"need 'left' and 'right' numbers\"}");
+    }
+    int16_t l = (int16_t)jl->valuedouble;
+    int16_t r = (int16_t)jr->valuedouble;
+    esp_err_t err = balancer_set_pwm(l, r);
+    char buf[96];
+    if (err == ESP_OK) {
+        snprintf(buf, sizeof(buf), "{\"ok\":true,\"left\":%d,\"right\":%d}", l, r);
+    } else {
+        snprintf(buf, sizeof(buf),
+                 "{\"ok\":false,\"error\":\"%s\",\"hint\":\"set_external(true) first\"}",
+                 esp_err_to_name(err));
+    }
+    return make_text_content(buf);
+}
+
 // ---------- Tool dispatch table ----------
 
 typedef struct {
@@ -157,6 +226,27 @@ static const mcp_tool_t TOOLS[] = {
         "\"angular\":{\"type\":\"number\",\"minimum\":-1,\"maximum\":1,\"description\":\"Yaw rate bias\"}"
         "},\"required\":[\"linear\",\"angular\"],\"additionalProperties\":false}",
         tool_drive,
+    },
+    {
+        "get_imu",
+        "Rich IMU snapshot for host-side PID: fused angle_deg, bias-corrected gyro_dps, raw accel_xyz (g), raw gyro_xyz (dps), gyro_bias_dps, loop_dt_ms, loops, state.",
+        "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+        tool_get_imu,
+    },
+    {
+        "set_external",
+        "Enter (enabled=true) or leave (enabled=false) EXTERNAL mode. In EXTERNAL mode the on-device PID is bypassed and motors take their PWM from set_pwm; tilt-cutoff and I\u00b2C-fault safety still apply. Enabling requires the bot to currently be DISARMED/CRASHED/FAULT (call disarm first if armed).",
+        "{\"type\":\"object\",\"properties\":{\"enabled\":{\"type\":\"boolean\"}},\"required\":[\"enabled\"],\"additionalProperties\":false}",
+        tool_set_external,
+    },
+    {
+        "set_pwm",
+        "Set raw motor PWM in EXTERNAL mode. left/right in [-1023..1023] (clamped to PWM_LIMIT). Each call refreshes a ~200 ms watchdog: stop calling and motors decay to 0. Returns ESP_ERR_INVALID_STATE outside EXTERNAL.",
+        "{\"type\":\"object\",\"properties\":{"
+        "\"left\":{\"type\":\"integer\",\"minimum\":-1023,\"maximum\":1023},"
+        "\"right\":{\"type\":\"integer\",\"minimum\":-1023,\"maximum\":1023}"
+        "},\"required\":[\"left\",\"right\"],\"additionalProperties\":false}",
+        tool_set_pwm,
     },
 };
 static const size_t N_TOOLS = sizeof(TOOLS) / sizeof(TOOLS[0]);
@@ -396,6 +486,174 @@ static esp_err_t mcp_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// ============================================================
+// WebSocket transport (low-latency host-PID path)
+// ============================================================
+//
+// URI: ws://<bot-ip>:8080/ws
+//
+// Server -> client (binary, 28 bytes, little-endian): IMU frame
+//   u32  magic = 'B','I','M','U' = 0x554D4942
+//   u32  loops
+//   f32  angle_deg
+//   f32  gyro_dps
+//   f32  accel_mag_g
+//   f32  loop_dt_ms
+//   u8   state          (balancer_state_t)
+//   u8   reserved[3]
+//
+// Client -> server (binary, 8 bytes, little-endian): PWM frame
+//   u32  magic = 'B','P','W','M' = 0x4D575042
+//   i16  pwm_left
+//   i16  pwm_right
+//
+// PWM frames go straight to balancer_set_pwm() (200 ms watchdog applies).
+// Single-client only; a second connection evicts the first.
+
+#include <freertos/task.h>
+
+#define BALA2_WS_IMU_MAGIC  0x554D4942u  // 'BIMU'
+#define BALA2_WS_PWM_MAGIC  0x4D575042u  // 'BPWM'
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t magic;
+    uint32_t loops;
+    float    angle_deg;
+    float    gyro_dps;
+    float    accel_mag_g;
+    float    loop_dt_ms;
+    uint8_t  state;
+    uint8_t  reserved[3];
+} bala2_imu_frame_t;     // 28 bytes
+
+typedef struct {
+    uint32_t magic;
+    int16_t  left;
+    int16_t  right;
+} bala2_pwm_frame_t;     // 8 bytes
+#pragma pack(pop)
+
+_Static_assert(sizeof(bala2_imu_frame_t) == 28, "imu frame size");
+_Static_assert(sizeof(bala2_pwm_frame_t) == 8,  "pwm frame size");
+
+static volatile int          s_ws_fd = -1;     // <0 = no client
+static TaskHandle_t          s_ws_task = NULL;
+
+static void ws_sender_task(void *arg)
+{
+    const TickType_t period = pdMS_TO_TICKS(10);   // 100 Hz IMU push
+    TickType_t next = xTaskGetTickCount();
+    uint32_t send_errs = 0;
+
+    for (;;) {
+        vTaskDelayUntil(&next, period);
+
+        int fd = s_ws_fd;
+        httpd_handle_t h = s_httpd;
+        if (fd < 0 || h == NULL) continue;
+
+        balancer_imu_t s;
+        balancer_get_imu(&s);
+        balancer_status_t st;
+        balancer_get_status(&st);
+
+        bala2_imu_frame_t frame = {
+            .magic       = BALA2_WS_IMU_MAGIC,
+            .loops       = s.loops,
+            .angle_deg   = s.angle_deg,
+            .gyro_dps    = s.gyro_dps,
+            .accel_mag_g = st.accel_mag_g,
+            .loop_dt_ms  = s.loop_dt_ms,
+            .state       = (uint8_t)s.state,
+            .reserved    = {0, 0, 0},
+        };
+
+        httpd_ws_frame_t wf = {
+            .final   = true,
+            .fragmented = false,
+            .type    = HTTPD_WS_TYPE_BINARY,
+            .payload = (uint8_t *)&frame,
+            .len     = sizeof(frame),
+        };
+        esp_err_t r = httpd_ws_send_frame_async(h, fd, &wf);
+        if (r != ESP_OK) {
+            send_errs++;
+            if (send_errs > 5) {
+                ESP_LOGW(TAG, "ws sender: drop fd=%d after %u errs (%s)",
+                         fd, (unsigned)send_errs, esp_err_to_name(r));
+                s_ws_fd = -1;
+                send_errs = 0;
+            }
+        } else {
+            send_errs = 0;
+        }
+    }
+}
+
+static void ws_ensure_sender(void)
+{
+    if (s_ws_task) return;
+    BaseType_t ok = xTaskCreatePinnedToCore(
+        ws_sender_task, "ws_send", 3 * 1024, NULL,
+        /*priority*/ 5, &s_ws_task, /*core*/ 0);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "failed to start ws sender task");
+        s_ws_task = NULL;
+    }
+}
+
+static esp_err_t ws_handler(httpd_req_t *req)
+{
+    // Initial handshake call: req->method == HTTP_GET, no payload yet.
+    if (req->method == HTTP_GET) {
+        int fd = httpd_req_to_sockfd(req);
+        int prev = s_ws_fd;
+        s_ws_fd = fd;
+        ws_ensure_sender();
+        ESP_LOGI(TAG, "ws client connected fd=%d (prev=%d)", fd, prev);
+        return ESP_OK;
+    }
+
+    // Subsequent calls: incoming frame.
+    httpd_ws_frame_t wf = {0};
+    esp_err_t r = httpd_ws_recv_frame(req, &wf, 0);   // peek length
+    if (r != ESP_OK) return r;
+
+    if (wf.type == HTTPD_WS_TYPE_CLOSE) {
+        if (s_ws_fd == httpd_req_to_sockfd(req)) s_ws_fd = -1;
+        ESP_LOGI(TAG, "ws client closed");
+        return ESP_OK;
+    }
+    if (wf.type == HTTPD_WS_TYPE_PING) {
+        // esp_http_server replies to PING automatically when len==0; if
+        // there's a payload, fall through and just ignore the data.
+        return ESP_OK;
+    }
+    if (wf.type != HTTPD_WS_TYPE_BINARY) {
+        return ESP_OK;     // ignore TEXT etc.
+    }
+    if (wf.len != sizeof(bala2_pwm_frame_t)) {
+        ESP_LOGW(TAG, "ws: bad frame len %u (want %u)",
+                 (unsigned)wf.len, (unsigned)sizeof(bala2_pwm_frame_t));
+        return ESP_OK;
+    }
+
+    bala2_pwm_frame_t pf;
+    wf.payload = (uint8_t *)&pf;
+    r = httpd_ws_recv_frame(req, &wf, sizeof(pf));
+    if (r != ESP_OK) return r;
+
+    if (pf.magic != BALA2_WS_PWM_MAGIC) {
+        ESP_LOGW(TAG, "ws: bad magic 0x%08x", (unsigned)pf.magic);
+        return ESP_OK;
+    }
+    // Track the active fd in case we got it from a different connection.
+    s_ws_fd = httpd_req_to_sockfd(req);
+    balancer_set_pwm(pf.left, pf.right);     // returns INVALID_STATE if not EXTERNAL; we just drop
+    return ESP_OK;
+}
+
 esp_err_t mcp_server_start(void)
 {
     if (s_httpd) return ESP_OK;
@@ -403,7 +661,7 @@ esp_err_t mcp_server_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 8080;
     cfg.ctrl_port = 32769;          // must differ from OTA server's ctrl_port (default 32768)
-    cfg.max_uri_handlers = 6;
+    cfg.max_uri_handlers = 8;
     cfg.lru_purge_enable = true;
     cfg.recv_wait_timeout = 10;
     cfg.send_wait_timeout = 10;
@@ -424,10 +682,15 @@ esp_err_t mcp_server_start(void)
     httpd_uri_t mcp_get = {
         .uri = "/mcp", .method = HTTP_GET, .handler = mcp_get_handler, .user_ctx = NULL,
     };
+    httpd_uri_t ws_uri = {
+        .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .user_ctx = NULL,
+        .is_websocket = true,
+    };
     httpd_register_uri_handler(s_httpd, &root_uri);
     httpd_register_uri_handler(s_httpd, &mcp_post);
     httpd_register_uri_handler(s_httpd, &mcp_get);
+    httpd_register_uri_handler(s_httpd, &ws_uri);
 
-    ESP_LOGI(TAG, "MCP server listening on http://<bot-ip>:8080/mcp");
+    ESP_LOGI(TAG, "MCP server listening on http://<bot-ip>:8080/mcp  (ws on /ws)");
     return ESP_OK;
 }

@@ -21,6 +21,7 @@ static const char *state_str(balancer_state_t s) {
         case BALANCER_ARMED:    return "ON";
         case BALANCER_CRASHED:  return "CRASH";
         case BALANCER_FAULT:    return "FAULT";
+        case BALANCER_EXTERNAL: return "EXT";
     }
     return "?";
 }
@@ -31,6 +32,7 @@ static uint32_t state_color(balancer_state_t s) {
         case BALANCER_ARMING:   return TFT_YELLOW;
         case BALANCER_CRASHED:  return TFT_RED;
         case BALANCER_FAULT:    return TFT_ORANGE;
+        case BALANCER_EXTERNAL: return TFT_CYAN;
         case BALANCER_DISARMED:
         default:                return TFT_DARKGREY;
     }

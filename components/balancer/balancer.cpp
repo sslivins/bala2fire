@@ -93,8 +93,11 @@ static inline float pick_gyro_axis(float x, float y, float z) {
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static balancer_status_t s_status;
+static balancer_imu_t    s_imu;     // richer IMU snapshot for host PID
 static volatile bool s_arm_request;
 static volatile bool s_disarm_request;
+static volatile bool s_external_enable_request;
+static volatile bool s_external_disable_request;
 
 // Drive command (set by balancer_set_drive, consumed in control_task).
 // Stale commands (>500 ms old) decay to zero so loss of caller stops motion.
@@ -102,7 +105,14 @@ static float    s_drive_linear  = 0.0f;
 static float    s_drive_angular = 0.0f;
 static int64_t  s_drive_us      = 0;
 
-static constexpr int64_t DRIVE_TIMEOUT_US = 500 * 1000;   // 500 ms
+// External-mode raw PWM command (set by balancer_set_pwm).
+// Stale (>200 ms) -> motors to 0.
+static int16_t  s_ext_pwm_left  = 0;
+static int16_t  s_ext_pwm_right = 0;
+static int64_t  s_ext_pwm_us    = 0;
+
+static constexpr int64_t DRIVE_TIMEOUT_US     = 500 * 1000;   // 500 ms
+static constexpr int64_t EXT_PWM_TIMEOUT_US   = 200 * 1000;   // 200 ms
 static constexpr float   DRIVE_MAX_LEAN_DEG = 2.0f;        // |linear| -> setpoint offset
 static constexpr float   DRIVE_MAX_TURN_FRAC = 0.25f;      // |angular| -> diff PWM as fraction of pwm_abs
 
@@ -289,6 +299,8 @@ static void control_task(void *arg)
         if (s_disarm_request) {
             s_disarm_request = false;
             s_arm_request = false;
+            s_external_enable_request = false;
+            s_external_disable_request = false;
             st = BALANCER_DISARMED;
             pid_reset(&angle_pid);
             pid_reset(&speed_pid);
@@ -305,15 +317,39 @@ static void control_task(void *arg)
             // Pre-load filter from current accel snapshot.
             if (accel_trustworthy) angle_deg = accel_angle_deg;
         }
+        if (s_external_enable_request &&
+            (st == BALANCER_DISARMED ||
+             st == BALANCER_CRASHED ||
+             st == BALANCER_FAULT)) {
+            s_external_enable_request = false;
+            st = BALANCER_EXTERNAL;
+            // Start with motors at 0; require host to call set_pwm.
+            portENTER_CRITICAL(&s_lock);
+            s_ext_pwm_left = s_ext_pwm_right = 0;
+            s_ext_pwm_us = 0;
+            portEXIT_CRITICAL(&s_lock);
+        } else if (s_external_enable_request) {
+            // Reject silently; caller learns via balancer_set_external return.
+            s_external_enable_request = false;
+        }
+        if (s_external_disable_request) {
+            s_external_disable_request = false;
+            if (st == BALANCER_EXTERNAL) {
+                st = BALANCER_DISARMED;
+            }
+        }
 
         // Safety cutoff
-        if ((st == BALANCER_ARMED || st == BALANCER_ARMING) &&
+        if ((st == BALANCER_ARMED || st == BALANCER_ARMING ||
+             st == BALANCER_EXTERNAL) &&
             fabsf(angle_deg) > (float)CONFIG_BALANCER_TILT_CUTOFF_DEG) {
             ESP_LOGW(TAG, "tilt cutoff: %.1f deg", angle_deg);
             st = BALANCER_CRASHED;
         }
         // I²C fault -> disarm (crash-safe)
-        if (enc_err != ESP_OK && (st == BALANCER_ARMED || st == BALANCER_ARMING)) {
+        if (enc_err != ESP_OK && (st == BALANCER_ARMED ||
+                                  st == BALANCER_ARMING ||
+                                  st == BALANCER_EXTERNAL)) {
             ESP_LOGW(TAG, "encoder read fault, disarming");
             st = BALANCER_FAULT;
         }
@@ -355,6 +391,23 @@ static void control_task(void *arg)
             if (pr < -pwm_abs) pr = -pwm_abs;
             pwm_left  = (int16_t)pl;
             pwm_right = (int16_t)pr;
+        } else if (st == BALANCER_EXTERNAL) {
+            // Host-supplied raw PWM with watchdog.
+            int16_t epl = 0, epr = 0;
+            portENTER_CRITICAL(&s_lock);
+            if (s_ext_pwm_us != 0 &&
+                (now_us - s_ext_pwm_us) < EXT_PWM_TIMEOUT_US) {
+                epl = s_ext_pwm_left;
+                epr = s_ext_pwm_right;
+            }
+            portEXIT_CRITICAL(&s_lock);
+            float fpl = (float)epl, fpr = (float)epr;
+            if (fpl >  pwm_abs) fpl =  pwm_abs;
+            if (fpl < -pwm_abs) fpl = -pwm_abs;
+            if (fpr >  pwm_abs) fpr =  pwm_abs;
+            if (fpr < -pwm_abs) fpr = -pwm_abs;
+            pwm_left  = (int16_t)fpl;
+            pwm_right = (int16_t)fpr;
         } else if (st == BALANCER_ARMING) {
             bool within_window = fabsf(angle_deg - angle_pid.setpoint) <
                                  (float)CONFIG_BALANCER_ARM_ANGLE_DEG;
@@ -386,7 +439,8 @@ static void control_task(void *arg)
 #endif
 
         esp_err_t mot_err = bala2_base_set_speed(pwm_left, pwm_right);
-        if (mot_err != ESP_OK && st == BALANCER_ARMED) {
+        if (mot_err != ESP_OK && (st == BALANCER_ARMED ||
+                                  st == BALANCER_EXTERNAL)) {
             ESP_LOGW(TAG, "motor write fault, disarming");
             st = BALANCER_FAULT;
             bala2_base_set_speed(0, 0);
@@ -408,6 +462,19 @@ static void control_task(void *arg)
         if (overran)              s_status.overrun_count++;
         if (enc_err != ESP_OK ||
             mot_err != ESP_OK)    s_status.i2c_err_count++;
+        // Rich IMU snapshot (for host-side PID via balancer_get_imu).
+        s_imu.angle_deg     = angle_deg;
+        s_imu.gyro_dps      = gyro_dps;
+        s_imu.accel_x       = ax;
+        s_imu.accel_y       = ay;
+        s_imu.accel_z       = az;
+        s_imu.gyro_x        = gx;
+        s_imu.gyro_y        = gy;
+        s_imu.gyro_z        = gz;
+        s_imu.gyro_bias_dps = gyro_bias_dps;
+        s_imu.loop_dt_ms    = dt_s * 1000.0f;
+        s_imu.loops         = s_status.loops;
+        s_imu.state         = st;
         portEXIT_CRITICAL(&s_lock);
     }
 }
@@ -454,4 +521,50 @@ extern "C" void balancer_get_status(balancer_status_t *out)
     portENTER_CRITICAL(&s_lock);
     *out = s_status;
     portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" void balancer_get_imu(balancer_imu_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s_lock);
+    *out = s_imu;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" esp_err_t balancer_set_external(bool enable)
+{
+    portENTER_CRITICAL(&s_lock);
+    balancer_state_t st = s_status.state;
+    portEXIT_CRITICAL(&s_lock);
+    if (enable) {
+        if (st != BALANCER_DISARMED &&
+            st != BALANCER_CRASHED  &&
+            st != BALANCER_FAULT) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        s_external_enable_request = true;
+    } else {
+        s_external_disable_request = true;
+    }
+    return ESP_OK;
+}
+
+extern "C" esp_err_t balancer_set_pwm(int16_t left, int16_t right)
+{
+    portENTER_CRITICAL(&s_lock);
+    balancer_state_t st = s_status.state;
+    if (st != BALANCER_EXTERNAL) {
+        portEXIT_CRITICAL(&s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const int16_t lim = (int16_t)CONFIG_BALANCER_PWM_LIMIT;
+    if (left  >  lim) left  =  lim;
+    if (left  < -lim) left  = -lim;
+    if (right >  lim) right =  lim;
+    if (right < -lim) right = -lim;
+    s_ext_pwm_left  = left;
+    s_ext_pwm_right = right;
+    s_ext_pwm_us    = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
 }

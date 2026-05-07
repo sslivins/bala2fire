@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "bala2-fire": {
+      "type": "http",
+      "url": "http://192.168.8.138:8080/mcp"
+    }
+  }
+}

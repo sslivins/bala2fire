@@ -118,6 +118,31 @@ class Bala2:
             "drive", {"linear": float(linear), "angular": float(angular)}
         )
 
+    # ---- host-side PID support ----
+
+    def get_imu(self) -> Dict[str, Any]:
+        """Rich IMU snapshot: angle_deg, gyro_dps, accel_xyz, gyro_xyz,
+        gyro_bias_dps, loop_dt_ms, loops, state."""
+        r = self._call_tool("get_imu")
+        if not isinstance(r, dict):
+            raise Bala2Error(f"unexpected get_imu payload: {r!r}")
+        return r
+
+    def set_external(self, enabled: bool) -> Dict[str, Any]:
+        """Enter/leave EXTERNAL mode. Enabling requires DISARMED state.
+        Returns dict with 'ok' and possibly 'error'."""
+        r = self._call_tool("set_external", {"enabled": bool(enabled)})
+        if isinstance(r, dict):
+            return r
+        return {"ok": False, "raw": r}
+
+    def set_pwm(self, left: int, right: int) -> Dict[str, Any]:
+        """Raw PWM in EXTERNAL mode. Watchdog ~200 ms; resend at >5 Hz."""
+        r = self._call_tool("set_pwm", {"left": int(left), "right": int(right)})
+        if isinstance(r, dict):
+            return r
+        return {"ok": False, "raw": r}
+
 
 if __name__ == "__main__":
     # Smoke test:  python bala2_client.py [host]

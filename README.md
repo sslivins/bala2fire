@@ -110,6 +110,117 @@ bala2/
 - **Button B** → plays a 1 kHz beep on the speaker
 - **Button C** → reads MPU6886 accel and prints `ax`/`ay`
 
+## On-device APIs
+
+Once Wi-Fi is up, the firmware exposes two HTTP servers on the Fire:
+
+| Server | Port | Purpose |
+|---|---|---|
+| OTA + status | **80** | `GET /` (build info HTML), `GET /info` (JSON), `POST /update` (OTA) |
+| MCP + WebSocket | **8080** | `POST /mcp` (JSON-RPC 2.0), `GET /ws` (binary WS for low-latency host PID) |
+
+OTA upload from a host:
+
+```powershell
+# uses tools/upload.ps1; default IP is 10.25.2.55
+./tools/upload.ps1 -Ip 192.168.8.138
+```
+
+### MCP (Model Context Protocol) server
+
+The robot speaks a minimal subset of [MCP][mcp] over JSON-RPC 2.0 at
+`POST http://<bot-ip>:8080/mcp`. Any MCP client (Claude Desktop, MCP
+Inspector, the VS Code Copilot Chat agent, FastMCP-as-client …) can
+discover and call its tools. Exposed tools:
+
+| Tool | Args | Effect |
+|---|---|---|
+| `arm` | – | Request ARM (succeeds when upright + still) |
+| `disarm` | – | Force DISARMED, motors off |
+| `is_armed` | – | `{"armed": bool}` |
+| `get_status` | – | Full balancer telemetry: state, angle, gyro, PWM, encoders, dt, error counts |
+| `drive` | `linear` (-1..1), `angular` (-1..1) | Velocity bias while ARMED. Watchdog: ~500 ms |
+| `get_imu` | – | Rich IMU snapshot for host-side PID (raw + fused) |
+| `set_external` | `enabled` (bool) | Enter/leave EXTERNAL mode (on-device PID off, raw PWM control) |
+| `set_pwm` | `left`, `right` (-1023..1023) | Raw motor PWM in EXTERNAL. Watchdog: ~200 ms |
+
+[mcp]: https://modelcontextprotocol.io
+
+**Register the server in VS Code** by adding `.vscode/mcp.json` (already
+in this repo):
+
+```json
+{
+  "servers": {
+    "bala2-fire": { "type": "http", "url": "http://192.168.8.138:8080/mcp" }
+  }
+}
+```
+
+Then in VS Code: *Command Palette → MCP: List Servers → Start
+`bala2-fire`*. The five tools become callable from Copilot Chat as
+`mcp_bala2-fire_arm`, `mcp_bala2-fire_drive`, etc.
+
+**Quick curl smoke test:**
+
+```bash
+curl -sS -X POST http://192.168.8.138:8080/mcp \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+### WebSocket transport (low-latency host PID)
+
+For host-side closed-loop control, JSON-RPC over HTTP is too slow
+(~10–40 ms per round trip). The same server exposes a binary WebSocket
+at `ws://<bot-ip>:8080/ws`:
+
+- **Server → client (28 B every 10 ms):** `magic / loops / angle_deg /
+  gyro_dps / accel_mag_g / loop_dt_ms / state` (little-endian, packed).
+- **Client → server (8 B per call):** `magic / left / right` →
+  forwarded to `balancer_set_pwm()` with the same 200 ms watchdog.
+
+Single client only; a second connection evicts the first. The device
+must be in EXTERNAL state for PWM frames to take effect — set that via
+the MCP `set_external` tool first.
+
+### Python client + tools
+
+Stdlib-only client + a few demo scripts under [`tools/`](tools/):
+
+| File | Purpose | Deps |
+|---|---|---|
+| [`tools/bala2_client.py`](tools/bala2_client.py) | Sync MCP client. `Bala2(host).arm() / .disarm() / .get_status() / .drive(l,a) / .get_imu() / .set_external(bool) / .set_pwm(l,r)` | stdlib |
+| [`tools/bala2_ws.py`](tools/bala2_ws.py) | Threaded WebSocket client. RX thread keeps `latest()` fresh; `send_pwm(l, r)` writes a binary frame | `pip install websocket-client` |
+| [`tools/drive_loop.py`](tools/drive_loop.py) | Send `drive(linear, angular)` at 20 Hz for N seconds | stdlib |
+| [`tools/balance_keepalive.py`](tools/balance_keepalive.py) | Arm + feed the drive watchdog; auto re-arm after a crash | stdlib |
+| [`tools/host_pid_balance.py`](tools/host_pid_balance.py) | Host PID over HTTP (~50 Hz, marginal) | stdlib |
+| [`tools/host_pid_balance_ws.py`](tools/host_pid_balance_ws.py) | Host PID over WebSocket (~100 Hz, viable) | `websocket-client` |
+| [`tools/upload.ps1`](tools/upload.ps1) | OTA flash via `POST /update` | – |
+
+Minimal example:
+
+```python
+from bala2_client import Bala2
+bot = Bala2("192.168.8.138")
+bot.initialize()
+print(bot.get_status())   # {'state': 'disarmed', 'angle_deg': ..., ...}
+bot.arm()
+bot.drive(0.0, 0.3)       # nudge yaw right; resend at >2 Hz to keep moving
+bot.disarm()
+```
+
+Tight-loop balancer over WebSocket:
+
+```bash
+pip install websocket-client
+python tools/host_pid_balance_ws.py --host 192.168.8.138 --kp 25 --kd 0.6
+```
+
+The on-device 200 Hz PID is still the right answer for actually keeping
+the bot up; the WS path exists so you can experiment with custom
+controllers (LQR, neural, RL …) without reflashing every iteration.
+
 ## Next steps
 
 The STM32 on the base handles only PWM + encoders. **Balancing runs on

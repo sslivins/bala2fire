@@ -27,6 +27,8 @@ typedef enum {
     BALANCER_ARMED,       // Running PID, motors live
     BALANCER_CRASHED,     // Tilt cutoff tripped; manual re-arm required
     BALANCER_FAULT,       // Comms / sensor fault; manual re-arm required
+    BALANCER_EXTERNAL,    // Host-controlled raw PWM (on-device PID bypassed,
+                          // tilt-cutoff + I²C-fault safety still active)
 } balancer_state_t;
 
 typedef struct {
@@ -66,6 +68,45 @@ void balancer_set_drive(float linear, float angular);
 
 // Telemetry snapshot (copied out; thread-safe).
 void balancer_get_status(balancer_status_t *out);
+
+// ---- Host-side control ("external mode") ----
+//
+// Lets a host script run the PID loop. Workflow:
+//   1. balancer_set_external(true)   // requires DISARMED/CRASHED/FAULT; -> EXTERNAL
+//   2. balancer_get_imu(...) at >50 Hz, compute PWM, balancer_set_pwm(l, r)
+//   3. balancer_set_external(false)  // -> DISARMED
+//
+// While EXTERNAL: on-device PID is OFF, motors track caller's set_pwm()
+// values, but the device still:
+//   * reads IMU + encoders every loop tick (visible via _get_imu / _get_status)
+//   * trips tilt-cutoff -> CRASHED if |angle| > limit
+//   * trips fault if I²C fails
+//   * watchdogs set_pwm: if no update for ~200 ms, motors -> 0
+//   * accepts balancer_disarm() at any time (-> DISARMED)
+
+typedef struct {
+    float angle_deg;          // fused tilt (0 = upright)
+    float gyro_dps;            // tilt-axis rate, bias-corrected
+    float accel_x, accel_y, accel_z;   // raw accel, g
+    float gyro_x, gyro_y, gyro_z;      // raw gyro, dps (pre-bias)
+    float gyro_bias_dps;        // current learned bias on tilt axis
+    float loop_dt_ms;
+    uint32_t loops;
+    balancer_state_t state;
+} balancer_imu_t;
+
+void balancer_get_imu(balancer_imu_t *out);
+
+// Enter / leave EXTERNAL mode.
+// enable=true requires current state in {DISARMED, CRASHED, FAULT}.
+// enable=false unconditionally returns to DISARMED.
+// Returns ESP_OK or ESP_ERR_INVALID_STATE.
+esp_err_t balancer_set_external(bool enable);
+
+// Set raw PWM. Only effective in EXTERNAL state. Each call refreshes a
+// ~200 ms watchdog: stop calling and motors decay to 0. Returns
+// ESP_ERR_INVALID_STATE outside EXTERNAL.
+esp_err_t balancer_set_pwm(int16_t left, int16_t right);
 
 #ifdef __cplusplus
 }
