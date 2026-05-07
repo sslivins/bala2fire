@@ -113,7 +113,13 @@ static int64_t  s_ext_pwm_us    = 0;
 
 static constexpr int64_t DRIVE_TIMEOUT_US     = 500 * 1000;   // 500 ms
 static constexpr int64_t EXT_PWM_TIMEOUT_US   = 200 * 1000;   // 200 ms
-static constexpr float   DRIVE_MAX_LEAN_DEG = 2.0f;        // |linear| -> setpoint offset
+// `linear` drives the speed-PID setpoint (target sum-of-encoders per
+// loop, after the 0.8 IIR). The angle PID then leans the bot to
+// maintain that wheel speed -- this is the standard cascade balancer
+// translation trick. Trying to drive via an angle-setpoint bias alone
+// doesn't work: the speed PID sees the resulting motion as error and
+// brakes the wheels back to zero.
+static constexpr float   DRIVE_MAX_SPEED     = 30.0f;      // |linear|=1 -> 30 enc-counts / loop (filtered)
 static constexpr float   DRIVE_MAX_TURN_FRAC = 0.25f;      // |angular| -> diff PWM as fraction of pwm_abs
 
 static void set_state(balancer_state_t st) __attribute__((unused));
@@ -374,8 +380,10 @@ static void control_task(void *arg)
         // --- Compute output ---
         int16_t pwm_left = 0, pwm_right = 0;
         if (st == BALANCER_ARMED) {
-            // Apply linear drive as a small tilt-setpoint offset.
-            angle_pid.setpoint = setpoint_deg() + drv_lin * DRIVE_MAX_LEAN_DEG;
+            // Drive: linear -> speed-PID target (cascade leans bot to
+            // maintain wheel speed). Angle setpoint stays at trim.
+            angle_pid.setpoint = setpoint_deg();
+            speed_pid.setpoint = drv_lin * DRIVE_MAX_SPEED;
             float pwm_angle = pid_update(&angle_pid, angle_deg);
             float pwm_speed = pid_update(&speed_pid, motor_speed_filt);
             float pwm = pwm_angle + pwm_speed;

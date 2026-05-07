@@ -29,7 +29,7 @@ class Bala2Error(RuntimeError):
 
 
 class Bala2:
-    def __init__(self, host: str, port: int = 8080, timeout: float = 1.0):
+    def __init__(self, host: str, port: int = 8080, timeout: float = 2.5):
         self.url = f"http://{host}:{port}/mcp"
         self.timeout = timeout
         self._ids = itertools.count(1)

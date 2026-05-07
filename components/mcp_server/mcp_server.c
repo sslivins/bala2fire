@@ -544,7 +544,6 @@ static void ws_sender_task(void *arg)
 {
     const TickType_t period = pdMS_TO_TICKS(10);   // 100 Hz IMU push
     TickType_t next = xTaskGetTickCount();
-    uint32_t send_errs = 0;
 
     for (;;) {
         vTaskDelayUntil(&next, period);
@@ -552,6 +551,18 @@ static void ws_sender_task(void *arg)
         int fd = s_ws_fd;
         httpd_handle_t h = s_httpd;
         if (fd < 0 || h == NULL) continue;
+
+        // Verify the fd is still a WebSocket client owned by this httpd.
+        // After a client disconnects, the OS may reuse this fd for an
+        // unrelated TCP connection (e.g. a normal HTTP POST on /mcp);
+        // sending WS frames there would corrupt the new request stream.
+        httpd_ws_client_info_t cinfo = httpd_ws_get_fd_info(h, fd);
+        if (cinfo != HTTPD_WS_CLIENT_WEBSOCKET) {
+            // No longer a live WS client -> drop quietly and wait for
+            // a new handshake to repopulate s_ws_fd.
+            s_ws_fd = -1;
+            continue;
+        }
 
         balancer_imu_t s;
         balancer_get_imu(&s);
@@ -578,15 +589,12 @@ static void ws_sender_task(void *arg)
         };
         esp_err_t r = httpd_ws_send_frame_async(h, fd, &wf);
         if (r != ESP_OK) {
-            send_errs++;
-            if (send_errs > 5) {
-                ESP_LOGW(TAG, "ws sender: drop fd=%d after %u errs (%s)",
-                         fd, (unsigned)send_errs, esp_err_to_name(r));
-                s_ws_fd = -1;
-                send_errs = 0;
-            }
-        } else {
-            send_errs = 0;
+            // Any send error -> assume client is gone immediately.
+            // Don't accumulate errors; even one bad frame on the wrong
+            // fd is enough to corrupt an HTTP response.
+            ESP_LOGI(TAG, "ws sender: drop fd=%d (%s)",
+                     fd, esp_err_to_name(r));
+            s_ws_fd = -1;
         }
     }
 }
