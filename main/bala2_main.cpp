@@ -8,6 +8,7 @@
 #include "bala2_wifi.h"
 #include "bala2_base.h"
 #include "balancer.h"
+#include "bala2_ota.h"
 
 static const char *TAG = "bala2";
 
@@ -81,6 +82,10 @@ extern "C" void app_main(void)
     bala2_wifi_state_t last_wstate = (bala2_wifi_state_t)-1;
     char last_ip[16] = "";
     balancer_state_t last_bstate = (balancer_state_t)-1;
+    bool ota_started = false;
+    bool ota_marked_valid = false;
+    int64_t boot_us = esp_timer_get_time();
+    int last_batt = -999;
 
     int redraw_divider = 0;
 
@@ -96,11 +101,40 @@ extern "C" void app_main(void)
             M5.Display.fillRect(10, 54, 310, 24, TFT_BLACK);
             M5.Display.setCursor(10, 54);
             switch (w.state) {
-                case BALA2_WIFI_NOT_CONFIGURED: M5.Display.print("IP: not configured"); break;
-                case BALA2_WIFI_CONNECTING:     M5.Display.print("IP: connecting..."); break;
-                case BALA2_WIFI_CONNECTED:      M5.Display.printf("IP: %s", w.ip_str); break;
-                case BALA2_WIFI_FAILED:         M5.Display.print("IP: connect failed"); break;
+                case BALA2_WIFI_NOT_CONFIGURED:
+                    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+                    M5.Display.print("IP: not configured");
+                    break;
+                case BALA2_WIFI_CONNECTING:
+                    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+                    M5.Display.print("IP: connecting...");
+                    break;
+                case BALA2_WIFI_CONNECTED:
+                    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+                    M5.Display.printf("IP: %s", w.ip_str);
+                    break;
+                case BALA2_WIFI_FAILED:
+                    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+                    M5.Display.print("IP: connect failed");
+                    break;
             }
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+
+        // Bring up the OTA HTTP server once Wi-Fi is up.
+        if (!ota_started && w.state == BALA2_WIFI_CONNECTED) {
+            if (bala2_ota_start() == ESP_OK) {
+                ota_started = true;
+                ESP_LOGI(TAG, "OTA HTTP server up at http://%s/", w.ip_str);
+            }
+        }
+
+        // Mark the running image as good after we've been up for ~10 s.
+        // If it crashes before then, the bootloader rolls back.
+        if (!ota_marked_valid &&
+            (esp_timer_get_time() - boot_us) > 10LL * 1000 * 1000) {
+            bala2_ota_mark_valid();
+            ota_marked_valid = true;
         }
 
         balancer_status_t b;
@@ -119,6 +153,23 @@ extern "C" void app_main(void)
         if (b.state != last_bstate) {
             last_bstate = b.state;
             draw_bal_indicator(b.state);
+        }
+
+        // Battery percentage in the top-right corner. Refresh every
+        // ~1 s (every 100 loop iterations at the 10 ms loop period).
+        if ((redraw_divider % 100) == 0) {
+            int batt = M5.Power.getBatteryLevel();
+            if (batt != last_batt) {
+                last_batt = batt;
+                M5.Display.fillRect(220, 6, 100, 20, TFT_BLACK);
+                M5.Display.setTextSize(2);
+                M5.Display.setCursor(220, 6);
+                if (batt < 0) {
+                    M5.Display.print("BAT --%");
+                } else {
+                    M5.Display.printf("BAT %3d%%", batt);
+                }
+            }
         }
 
         if (M5.BtnA.wasPressed()) {

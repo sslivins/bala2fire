@@ -26,3 +26,17 @@ CONFIG_FREERTOS_HZ=1000
 # Flip angle PID direction: verified on-hardware that tilting forward
 # drove the wheels INTO the fall with the default (-1) direction.
 CONFIG_BALANCER_ANGLE_DIR_POS=y
+
+# OTA partition layout (two ~3 MB app slots + 10 MB FAT) so we can flash
+# new firmware over Wi-Fi via components/bala2_ota.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# Enable rollback so a broken OTA reboots into the previous slot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# OTA streams a ~1 MB POST body; allow generous HTTP recv timeouts and
+# a slightly bigger HTTP server stack.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
