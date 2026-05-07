@@ -3,13 +3,18 @@
 Usage:
     .\.venv\Scripts\python.exe sample_balance.py [duration_seconds]
 
-Polls /telemetry every 50 ms (20 Hz) for `duration` seconds and prints
-a compact one-line summary per sample. After the run, prints a stats
-block: peak |angle|, RMS angle error, max gyro rate, PWM saturation
-fraction, mean loop_dt_ms, total overruns/i2c errors. Helpful for
-diagnosing whether a fall is "wheels couldn't catch up" (PWM saturating
-at +/- limit), "oscillation" (angle crosses zero rapidly), or "drift"
-(angle wanders monotonically with sub-saturation PWM).
+Plays a 3-2-1 countdown on the bot's speaker (POST /beep), then polls
+/telemetry every 50 ms (20 Hz) for `duration` seconds and prints a
+compact one-line summary per sample. The countdown gives the operator
+an audible "go now" cue at the bot itself instead of relying on a
+laptop terminal banner they can't see from across the room.
+
+After the run, prints a stats block: peak |angle|, RMS angle error,
+max gyro rate, PWM saturation fraction, mean loop_dt_ms, total
+overruns/i2c errors. Helpful for diagnosing whether a fall is "wheels
+couldn't catch up" (PWM saturating at +/- limit), "oscillation"
+(angle crosses zero rapidly), or "drift" (angle wanders monotonically
+with sub-saturation PWM).
 """
 from __future__ import annotations
 import math
@@ -25,8 +30,29 @@ DURATION = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
 PERIOD_S = 0.05  # 20 Hz
 
 
+def _beep(freq_hz: int, ms: int) -> None:
+    """Best-effort POST /beep; ignore errors so an old firmware that
+    doesn't have the endpoint just makes the script silent rather than
+    crash."""
+    try:
+        m._post("/beep", json={"freq": freq_hz, "ms": ms}, timeout=2.0)
+    except Exception:
+        pass
+
+
+def countdown() -> None:
+    """3-2-1-GO countdown audible on the bot."""
+    print("countdown: 3 . . 2 . . 1 . . GO", flush=True)
+    # three short low beeps, then one longer high beep at "GO"
+    for _ in range(3):
+        _beep(700, 80)
+        time.sleep(0.7)
+    _beep(1500, 250)
+
+
 def main() -> int:
-    print(f"sampling /telemetry from {m.BASE_URL} for {DURATION:.1f}s...")
+    print(f"sampling /telemetry from {m.BASE_URL} for {DURATION:.1f}s")
+    countdown()
     samples = []
     t0 = time.time()
     next_t = t0
@@ -48,6 +74,9 @@ def main() -> int:
         slack = next_t - time.time()
         if slack > 0:
             time.sleep(slack)
+
+    # End-of-sample beep so operator knows it's done.
+    _beep(900, 200)
 
     if not samples:
         print("no samples collected")

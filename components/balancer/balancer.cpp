@@ -489,3 +489,11 @@ extern "C" int balancer_format_telemetry_json(char *buf, int buflen)
     if (n < 0 || n >= buflen) return -2;
     return n;
 }
+
+extern "C" void balancer_beep(uint32_t freq_hz, uint32_t duration_ms)
+{
+    if (freq_hz == 0) freq_hz = 1000;
+    if (duration_ms == 0) duration_ms = 80;
+    if (duration_ms > 2000) duration_ms = 2000;  // cap; loud bot
+    M5.Speaker.tone((float)freq_hz, duration_ms);
+}

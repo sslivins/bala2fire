@@ -267,6 +267,44 @@ static esp_err_t setpoint_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, out, m);
 }
 
+// POST /beep   body: optional {"freq": <hz>, "ms": <duration>}
+//                                                                            // Plays a tone on the bot's speaker. Used by sample_balance.py to give
+// the operator an audible "go now" signal at the bot itself, since the
+// laptop's terminal banner isn't visible from across the room.
+static esp_err_t beep_post_handler(httpd_req_t *req)
+{
+    uint32_t freq = 1000;
+    uint32_t ms   = 120;
+
+    if (req->content_len > 0) {
+        char body[96];
+        int n = read_body(req, body, sizeof(body));
+        if (n < 0) {
+            return send_simple(req, 400, "text/plain",
+                n == -1 ? "body too large\n" : "read error\n");
+        }
+        cJSON *root = cJSON_Parse(body);
+        if (root) {
+            cJSON *jf = cJSON_GetObjectItemCaseSensitive(root, "freq");
+            cJSON *jm = cJSON_GetObjectItemCaseSensitive(root, "ms");
+            if (cJSON_IsNumber(jf) && jf->valuedouble > 0) {
+                freq = (uint32_t)jf->valuedouble;
+            }
+            if (cJSON_IsNumber(jm) && jm->valuedouble > 0) {
+                ms = (uint32_t)jm->valuedouble;
+            }
+            cJSON_Delete(root);
+        }
+    }
+
+    balancer_beep(freq, ms);
+    char out[64];
+    int m = snprintf(out, sizeof(out),
+        "{\"freq\":%u,\"ms\":%u}", (unsigned)freq, (unsigned)ms);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, out, m);
+}
+
 static const httpd_uri_t uri_telemetry = {
     .uri = "/telemetry", .method = HTTP_GET, .handler = telemetry_get_handler,
 };
@@ -278,6 +316,9 @@ static const httpd_uri_t uri_disarm = {
 };
 static const httpd_uri_t uri_setpoint = {
     .uri = "/setpoint", .method = HTTP_POST, .handler = setpoint_post_handler,
+};
+static const httpd_uri_t uri_beep = {
+    .uri = "/beep", .method = HTTP_POST, .handler = beep_post_handler,
 };
 
 esp_err_t bala2_ota_start(void)
@@ -306,6 +347,7 @@ esp_err_t bala2_ota_start(void)
     httpd_register_uri_handler(s_server, &uri_arm);
     httpd_register_uri_handler(s_server, &uri_disarm);
     httpd_register_uri_handler(s_server, &uri_setpoint);
+    httpd_register_uri_handler(s_server, &uri_beep);
 
     ESP_LOGI(TAG, "HTTP server listening on :80");
     return ESP_OK;

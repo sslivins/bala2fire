@@ -74,6 +74,12 @@ void balancer_get_status(balancer_status_t *out);
 //    "overruns":0,"i2c_errs":0}
 int balancer_format_telemetry_json(char *buf, int buflen);
 
+// Audible cue. Wraps M5.Speaker.tone() (which is C++); exposed here as
+// a C-callable so the HTTP layer can trigger beeps without pulling in
+// M5Unified. Used by tools/mcp_server/sample_balance.py to give the
+// operator a "go" signal at the bot itself when the sample starts.
+void balancer_beep(uint32_t freq_hz, uint32_t duration_ms);
+
 #ifdef __cplusplus
 }
 #endif
