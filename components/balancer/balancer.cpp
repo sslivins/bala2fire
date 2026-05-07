@@ -96,6 +96,16 @@ static balancer_status_t s_status;
 static volatile bool s_arm_request;
 static volatile bool s_disarm_request;
 
+// Drive command (set by balancer_set_drive, consumed in control_task).
+// Stale commands (>500 ms old) decay to zero so loss of caller stops motion.
+static float    s_drive_linear  = 0.0f;
+static float    s_drive_angular = 0.0f;
+static int64_t  s_drive_us      = 0;
+
+static constexpr int64_t DRIVE_TIMEOUT_US = 500 * 1000;   // 500 ms
+static constexpr float   DRIVE_MAX_LEAN_DEG = 2.0f;        // |linear| -> setpoint offset
+static constexpr float   DRIVE_MAX_TURN_FRAC = 0.25f;      // |angular| -> diff PWM as fraction of pwm_abs
+
 static void set_state(balancer_state_t st) __attribute__((unused));
 static void set_state(balancer_state_t st) {
     portENTER_CRITICAL(&s_lock);
@@ -313,16 +323,38 @@ static void control_task(void *arg)
             st = BALANCER_FAULT;
         }
 
+        // --- Read drive command (decay if stale) ---
+        float drv_lin = 0.0f, drv_ang = 0.0f;
+        portENTER_CRITICAL(&s_lock);
+        if ((now_us - s_drive_us) < DRIVE_TIMEOUT_US) {
+            drv_lin = s_drive_linear;
+            drv_ang = s_drive_angular;
+        } else {
+            s_drive_linear = 0.0f;
+            s_drive_angular = 0.0f;
+        }
+        portEXIT_CRITICAL(&s_lock);
+
         // --- Compute output ---
         int16_t pwm_left = 0, pwm_right = 0;
         if (st == BALANCER_ARMED) {
+            // Apply linear drive as a small tilt-setpoint offset.
+            angle_pid.setpoint = setpoint_deg() + drv_lin * DRIVE_MAX_LEAN_DEG;
             float pwm_angle = pid_update(&angle_pid, angle_deg);
             float pwm_speed = pid_update(&speed_pid, motor_speed_filt);
             float pwm = pwm_angle + pwm_speed;
             if (pwm >  pwm_abs) pwm =  pwm_abs;
             if (pwm < -pwm_abs) pwm = -pwm_abs;
-            pwm_left  = (int16_t)pwm;
-            pwm_right = (int16_t)pwm;
+            // Differential bias for yaw (positive angular = turn right).
+            float turn = drv_ang * DRIVE_MAX_TURN_FRAC * pwm_abs;
+            float pl = pwm - turn;
+            float pr = pwm + turn;
+            if (pl >  pwm_abs) pl =  pwm_abs;
+            if (pl < -pwm_abs) pl = -pwm_abs;
+            if (pr >  pwm_abs) pr =  pwm_abs;
+            if (pr < -pwm_abs) pr = -pwm_abs;
+            pwm_left  = (int16_t)pl;
+            pwm_right = (int16_t)pr;
         } else if (st == BALANCER_ARMING) {
             bool within_window = fabsf(angle_deg - angle_pid.setpoint) <
                                  (float)CONFIG_BALANCER_ARM_ANGLE_DEG;
@@ -392,6 +424,20 @@ extern "C" esp_err_t balancer_start(void)
 
 extern "C" void balancer_arm(void)    { s_arm_request = true; }
 extern "C" void balancer_disarm(void) { s_disarm_request = true; }
+
+extern "C" void balancer_set_drive(float linear, float angular)
+{
+    if (linear  >  1.0f) linear  =  1.0f;
+    if (linear  < -1.0f) linear  = -1.0f;
+    if (angular >  1.0f) angular =  1.0f;
+    if (angular < -1.0f) angular = -1.0f;
+    int64_t now = esp_timer_get_time();
+    portENTER_CRITICAL(&s_lock);
+    s_drive_linear  = linear;
+    s_drive_angular = angular;
+    s_drive_us      = now;
+    portEXIT_CRITICAL(&s_lock);
+}
 
 extern "C" bool balancer_is_armed(void)
 {

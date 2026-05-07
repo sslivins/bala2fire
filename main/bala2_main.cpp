@@ -9,6 +9,7 @@
 #include "bala2_base.h"
 #include "balancer.h"
 #include "bala2_ota.h"
+#include "mcp_server.h"
 
 static const char *TAG = "bala2";
 
@@ -73,6 +74,9 @@ extern "C" void app_main(void)
     M5.Display.printf("MAC %02X:%02X:%02X:%02X:%02X:%02X",
                       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    ESP_LOGI(TAG, "MAC (STA): %02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
     ESP_ERROR_CHECK(bala2_base_init());
     ESP_ERROR_CHECK(balancer_start());
     bala2_wifi_start();
@@ -126,6 +130,9 @@ extern "C" void app_main(void)
             if (bala2_ota_start() == ESP_OK) {
                 ota_started = true;
                 ESP_LOGI(TAG, "OTA HTTP server up at http://%s/", w.ip_str);
+                if (mcp_server_start() == ESP_OK) {
+                    ESP_LOGI(TAG, "MCP server up at http://%s:8080/mcp", w.ip_str);
+                }
             }
         }
 

@@ -56,6 +56,14 @@ void balancer_arm(void);
 void balancer_disarm(void);
 bool balancer_is_armed(void);
 
+// Drive command. Both axes are normalized to [-1.0, +1.0] and clamped.
+//   linear  : forward (+) / backward (-) bias on the tilt setpoint.
+//             A drive command lasts ~500 ms; resend at >2 Hz to keep
+//             moving. Loss of caller -> robot decelerates to balance.
+//   angular : right (+) / left (-) yaw, adds differential PWM bias.
+// Has effect only while ARMED.
+void balancer_set_drive(float linear, float angular);
+
 // Telemetry snapshot (copied out; thread-safe).
 void balancer_get_status(balancer_status_t *out);
 
