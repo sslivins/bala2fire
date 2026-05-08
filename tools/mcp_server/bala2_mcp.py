@@ -195,6 +195,141 @@ def firmware_info() -> dict | str:
         return _format_error("firmware_info", e)
 
 
+@mcp.tool()
+def drive(linear: float, angular: float = 0.0) -> dict | str:
+    """Continuous remote-control drive. Repeat within ~500 ms or motion auto-stops.
+
+    Args:
+        linear:  -1.0..+1.0. Positive = forward (bot leans forward, wheels
+                 follow). Negative = backward. Magnitude scales the lean
+                 angle up to ±1.5°.
+        angular: -1.0..+1.0. Positive = turn left (CCW from above).
+                 Negative = turn right. Magnitude scales differential
+                 PWM up to ±250 between the wheels.
+
+    Both can be non-zero simultaneously (drive and turn). Watchdog: if
+    no follow-up `drive` or `stop` call arrives within 500 ms, biases
+    auto-clear and the bot returns to balancing in place.
+
+    Bot must be armed; if not, this is a no-op until arm() is called.
+    """
+    try:
+        return _post("/drive", json={
+            "linear": float(linear),
+            "angular": float(angular),
+        })
+    except Exception as e:
+        return _format_error("drive", e)
+
+
+@mcp.tool()
+def stop() -> dict | str:
+    """Cancel any active motion command (drive, move_forward, rotate).
+
+    The balancer keeps running — bot stays upright in place. Different
+    from `disarm()`, which also kills motors. Use `stop` for "finish
+    moving and hold position", `disarm` for "shut everything off".
+    """
+    try:
+        return _post("/stop")
+    except Exception as e:
+        return _format_error("stop", e)
+
+
+@mcp.tool()
+def move_forward(inches: float, max_speed: float = 0.5) -> dict | str:
+    """Closed-loop move a specified distance forward (or backward if negative).
+
+    The bot snapshots its current encoder reading, leans in the requested
+    direction, and integrates wheel rotation until the target distance
+    is reached. The bot's natural rocking is filtered out automatically
+    by the encoder-sum integration — only net translation accumulates.
+
+    Returns immediately. Poll `motion_status()` to see when the motion
+    completes; typical durations are 1–4 seconds for short distances.
+
+    Args:
+        inches:    distance to travel. Negative = backward. Accuracy is
+                   roughly ±5% due to wheel slip; per-bot calibration
+                   improves this.
+        max_speed: 0..1 cruise scale. 0.5 is comfortable; 1.0 is
+                   maximum and risks instability.
+
+    Bot must be armed and balancing.
+    """
+    try:
+        return _post("/move_forward", json={
+            "inches": float(inches),
+            "max_speed": float(max_speed),
+        })
+    except Exception as e:
+        return _format_error("move_forward", e)
+
+
+@mcp.tool()
+def rotate(degrees: float, max_speed: float = 0.5) -> dict | str:
+    """Closed-loop rotate in place by a specified heading change.
+
+    Like `move_forward`, but spins the bot using differential wheel
+    speed. Returns immediately; poll `motion_status()` for completion.
+
+    Args:
+        degrees:   heading change. Positive = turn LEFT (CCW from above).
+                   Negative = turn RIGHT.
+        max_speed: 0..1 cruise scale.
+
+    Heading accuracy is ±5–10% (worse than translation due to wheel slip
+    during rotation). For long sequenced motions, errors compound.
+    """
+    try:
+        return _post("/rotate", json={
+            "degrees": float(degrees),
+            "max_speed": float(max_speed),
+        })
+    except Exception as e:
+        return _format_error("rotate", e)
+
+
+@mcp.tool()
+def motion_status() -> dict | str:
+    """Poll the current motion state.
+
+    Returns one of:
+      - {"in_progress": false, "mode": "NONE"}                         idle
+      - {"in_progress": true,  "mode": "DRIVE"}                        continuous
+      - {"in_progress": true,  "mode": "FORWARD",
+         "remaining_in": 4.2, "current_delta": ..., "target_delta": ...}
+      - {"in_progress": true,  "mode": "ROTATE",
+         "remaining_deg": 23.5, ...}
+
+    Use this to wait for a `move_forward` or `rotate` call to complete
+    before issuing the next command.
+    """
+    try:
+        return _get("/motion_status")
+    except Exception as e:
+        return _format_error("motion_status", e)
+
+
+@mcp.tool()
+def zero_encoders() -> dict | str:
+    """Reset both wheel encoders to 0.
+
+    Useful for empirical calibration: tare the encoders, push the bot
+    a measured distance by hand (with bot disarmed), then read
+    `get_status()` to see the encoder delta corresponding to that
+    distance.
+
+    Note: `move_forward` and `rotate` snapshot encoders at command
+    start and work from that snapshot, so calling this between motion
+    commands does NOT confuse them.
+    """
+    try:
+        return _post("/encoder/zero")
+    except Exception as e:
+        return _format_error("zero_encoders", e)
+
+
 # ---- Entrypoint ------------------------------------------------------------
 
 def main() -> None:
